@@ -1,0 +1,23 @@
+# ==============================================================================
+# Piam AI-Core - Git Ignore Configuration
+# ==============================================================================
+
+# Python environment
+venv/
+.venv/
+__pycache__/
+*.pyc
+src/*.egg-info/
+.pytest_cache/
+
+# AI Model Files (Do not track massive binary files)
+models/*
+!models/.gitkeep
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# IDE configurations
+.idea/
+.vscode/
