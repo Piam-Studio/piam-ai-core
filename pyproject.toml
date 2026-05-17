@@ -5,8 +5,11 @@ description = "Private, local AI core for Piam Studio automation"
 requires-python = ">=3.10"
 dependencies = [
     "llama-cpp-python>=0.2.85",
-    "pydantic>=2.0",            # For strict data validation
+    "pydantic>=2.0",
 ]
+
+[project.scripts]
+piam-ai = "piam_ai_core.cli:main"
 
 [build-system]
 requires = ["setuptools>=61.0.0"]
