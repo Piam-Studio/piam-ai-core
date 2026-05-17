@@ -2,119 +2,116 @@
 import argparse
 import sys
 import os
-from pydantic import BaseModel, Field
+import json
+import re
 from piam_ai_core.generator import PiamAiGenerator
 
 
-class ParsedRequirement(BaseModel):
+class BundleStructureManager:
+    def __init__(self, base_output_dir: str, table_name: str):
+        self.base_dir = base_output_dir
+        self.table = table_name
+        self.dca_path = os.path.join(self.base_dir, "contao", "dca", f"{self.table}.php")
+        self.lang_paths = {
+            "de": os.path.join(self.base_dir, "contao", "languages", "de", f"{self.table}.php"),
+            "en": os.path.join(self.base_dir, "contao", "languages", "en", f"{self.table}.php"),
+            "fr": os.path.join(self.base_dir, "contao", "languages", "fr", f"{self.table}.php")
+        }
+
+    def read_existing_context(self) -> dict:
+        context = {"dca": "", "languages": {"de": "", "en": "", "fr": ""}}
+        if os.path.exists(self.dca_path):
+            with open(self.dca_path, "r", encoding="utf-8") as f:
+                context["dca"] = f.read()
+        for lang, path in self.lang_paths.items():
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    context["languages"][lang] = f.read()
+        return context
+
+    def write_bundle_files(self, dca_content: str, lang_contents: dict):
+        os.makedirs(os.path.dirname(self.dca_path), exist_ok=True)
+        with open(self.dca_path, "w", encoding="utf-8") as f:
+            f.write(dca_content)
+        for lang, content in lang_contents.items():
+            path = self.lang_paths[lang]
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+
+
+def clean_and_parse_json(raw_string: str) -> dict:
     """
-    Data structure representing the cleaned and structured client requirement
-    before it gets passed to the underlying LLM logic.
+    Robust processing engine to sanitize and parse LLM-generated JSON strings
+    even if minor quotation or escaping anomalies occur within the payload.
     """
-    raw_text: str
-    target_table: str = Field(default="tl_content")  # Default to Contao content elements
-    output_filename: str
+    # Remove potential markdown block wrappers if model ignores instructions
+    cleaned = raw_string.strip()
+    if cleaned.startswith("```json"):
+        cleaned = cleaned[7:]
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3]
+    cleaned = cleaned.strip()
 
+    # Fix unescaped internal double quotes specifically in the generated SQL strings
+    cleaned = re.sub(r'["\u201c\u201d]sql["\u201c\u201d]\s*=>\s*["\u201c\u201d]([^"\n]+)', r'"sql" => \'\1\'', cleaned)
+    cleaned = re.sub(r'\'sql\'\s*=>\s*\"([^\"]+)', r"'sql' => '\1'", cleaned)
 
-class InputParser:
-    """
-    Responsible for sanitizing, validating, and structuring raw inputs
-    received from the CLI or external bridges.
-    """
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        # Fallback regex extraction if JSON structural boundaries are completely broken
+        dca_match = re.search(r'"dca"\s*:\s*"(.+?)"\s*,\s*"languages"', cleaned, re.DOTALL)
+        de_match = re.search(r'"de"\s*:\s*"(.+?)"\s*,\s*"en"', cleaned, re.DOTALL)
+        en_match = re.search(r'"en"\s*:\s*"(.+?)"\s*,\s*"fr"', cleaned, re.DOTALL)
+        fr_match = re.search(r'"fr"\s*:\s*"(.+?)"\s*}', cleaned, re.DOTALL)
 
-    @staticmethod
-    def sanitize_input(text: str) -> str:
-        """
-        Cleans the incoming text requirement from hazardous characters
-        and trims unnecessary whitespaces.
-        """
-        if not text:
-            return ""
-        return text.strip().replace('"', '\\"')
-
-    def parse(self, raw_input: str, table_name: str, file_name: str) -> ParsedRequirement:
-        """
-        Transforms raw string arguments into a validated ParsedRequirement object.
-        """
-        clean_text = self.sanitize_input(raw_input)
-
-        if not clean_text:
-            print("[ERROR] The provided requirement text is empty.", file=sys.stderr)
-            sys.exit(1)
-
-        # Guarantee that the file extension is always .php
-        if not file_name.endswith(".php"):
-            file_name = f"{file_name}.php"
-
-        return ParsedRequirement(
-            raw_text=clean_text,
-            target_table=table_name,
-            output_filename=file_name
-        )
+        if dca_match and de_match and en_match and fr_match:
+            return {
+                "dca": dca_match.group(1).encode().decode('unicode_escape'),
+                "languages": {
+                    "de": de_match.group(1).encode().decode('unicode_escape'),
+                    "en": en_match.group(1).encode().decode('unicode_escape'),
+                    "fr": fr_match.group(1).encode().decode('unicode_escape')
+                }
+            }
+        raise
 
 
 def main():
-    """
-    The main CLI entry point for the piam-ai-core suite.
-    Handles native command line argument parsing.
-    """
-    parser = argparse.ArgumentParser(
-        description="Piam AI-Core: Production-ready Contao DCA Code Generator"
-    )
-
-    # Define execution arguments
-    parser.add_argument(
-        "--requirements", "-r",
-        required=True,
-        help="The raw text briefing or requirement specification from the client."
-    )
-    parser.add_argument(
-        "--table", "-t",
-        default="tl_content",
-        help="The target Contao database table (e.g., tl_content, tl_news). Default: tl_content"
-    )
-    parser.add_argument(
-        "--output", "-o",
-        required=True,
-        help="The name of the target output file (e.g., tl_content_teaser.php)."
-    )
+    parser = argparse.ArgumentParser(description="Piam AI-Core: Automated Multi-File Contao Suite")
+    parser.add_argument("--requirements", "-r", required=True, help="The instruction to create, modify or extend.")
+    parser.add_argument("--table", "-t", default="tl_content", help="Target Contao table.")
 
     args = parser.parse_args()
+    export_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../output/piamstudio-contao-commerce-v1"))
 
-    # 1. Process and parse the input data
-    input_parser = InputParser()
-    structured_data = input_parser.parse(
-        raw_input=args.requirements,
-        table_name=args.table,
-        file_name=args.output
-    )
+    manager = BundleStructureManager(export_dir, args.table)
+    existing_context = manager.read_existing_context()
+
+    compiled_prompt = f"Existing Project Context:\n{json.dumps(existing_context, indent=2)}\n\nUser Task: {args.requirements}"
 
     print("==================================================")
-    print("        PIAM AI-CORE: INTERFACE PROCESSING        ")
+    print("      PIAM AI-CORE: MULTI-FILE ARCHITECT ENGINE   ")
     print("==================================================")
-    print(f"[INFO] Target Table: {structured_data.target_table}")
-    print(f"[INFO] Target File:  {structured_data.output_filename}")
-    print("[INFO] Initializing generator engine...")
+    print(f"[INFO] Target Table: {args.table}")
+    print("[INFO] Processing local context and running inference...")
 
-    # 2. Trigger the local AI inference engine
     generator = PiamAiGenerator()
+    raw_json_response = generator.generate_dca(compiled_prompt)
 
-    print("[INFO] Model loaded. Processing local code generation... Please wait.")
-    generated_php = generator.generate_dca(structured_data.raw_text)
+    try:
+        payload = clean_and_parse_json(raw_json_response)
+        manager.write_bundle_files(payload["dca"], payload["languages"])
 
-    # 3. Save the generated code directly into a local export directory
-    export_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../output"))
-    os.makedirs(export_dir, exist_ok=True)
-
-    target_file_path = os.path.join(export_dir, structured_data.output_filename)
-
-    with open(target_file_path, "w", encoding="utf-8") as php_file:
-        php_file.write(generated_php)
-
-    print("==================================================")
-    print("[SUCCESS] Contao DCA File successfully written!")
-    print(f"[LOCATION] {target_file_path}")
-    print("==================================================")
+        print("==================================================")
+        print("[SUCCESS] All files and translations successfully synchronized autonomously!")
+        print(f"[OUTPUT GENERATED AT] {export_dir}")
+        print("==================================================")
+    except Exception as e:
+        print(f"[FATAL] System failed to stabilize JSON structure: {e}", file=sys.stderr)
+        print(f"[RAW OUTPUT WAS]\n{raw_json_response}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
